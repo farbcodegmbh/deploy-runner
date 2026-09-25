@@ -35,7 +35,7 @@ cd /home/forge/example.com && sudo bash ~/runner-setup.sh
 It reads the repository and branch from the site's checkout, suggests the target from the site's name
 and the workflow from the target, and asks for each app's build `.env`. Nothing changes before you
 confirm a summary. The answers are saved per target in `/etc/deploy-runner/NAME/setup.conf`, so a second
-run asks nothing, and every step checks what is already there. Every answer can be passed instead, which skips its question:
+run only asks for confirmation, and every step checks what is already there. Every answer can be passed instead, which skips its question:
 
 | Option | Meaning |
 |--------|---------|

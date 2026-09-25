@@ -5,7 +5,7 @@
 # How it fits together and what stays manual: README.md of https://github.com/farbcodegmbh/deploy-runner
 #
 # Safe to re-run: every step checks what is already there, and the answers are saved per target, so a
-# second run asks nothing. It asks for two secrets and neither reaches a command line, the process list or
+# second run only asks for confirmation. It asks for two secrets and neither reaches a command line, the process list or
 # the log: the runner registration token and the site's Forge deploy hook URL.
 #
 # Run as root from the Forge site's directory, where it reads repository and branch from the site's

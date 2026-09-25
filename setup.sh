@@ -132,6 +132,28 @@ ask branch "Branch that deploys here" "${saved_branch:-${site_branch:-develop}}"
 [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "not a branch name: $branch"
 ask workflow "Deploy workflow file in .github/workflows" "${saved_workflow:-deploy-$target.yml}"
 [[ "$workflow" =~ ^[A-Za-z0-9_.-]+\.ya?ml$ ]] || fail "the workflow is a file name such as deploy-testing.yml"
+# a runner this repository already has on the server and no other target has claimed
+if [ -z "$runner_dir" ] && [ -z "$saved_runner_dir" ]; then
+    found=()
+    claimed=""
+    for conf in "$etc"/*/setup.conf; do
+        if [ -f "$conf" ]; then
+            claimed+="$(sed -n 's/^runner_dir=//p' "$conf")"$'\n'
+        fi
+    done
+    while IFS= read -r file; do
+        grep -qxF -- "$(dirname "$file")" <<< "$claimed" && continue
+        if python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("gitHubUrl") != sys.argv[2])' \
+            "$file" "https://github.com/$repo"; then
+            found+=("$(dirname "$file")")
+        fi
+    done < <(find "/home/$user" -maxdepth 3 -name .runner -type f 2>/dev/null)
+    if [ ${#found[@]} -eq 1 ]; then
+        saved_runner_dir=${found[0]}
+    elif [ ${#found[@]} -gt 1 ]; then
+        fail "several runners of $repo on this server (${found[*]}); pass --runner-dir"
+    fi
+fi
 runner_dir=${runner_dir:-${saved_runner_dir:-/home/$user/runners/$target}}
 
 builds=/srv/builds/$target
@@ -176,8 +198,8 @@ for pair in "${envs[@]}"; do
     [[ "${pair%%=*}" =~ ^[a-z0-9-]+$ ]] && [ -f "${pair#*=}" ] || fail "build env $pair: expected APP=existing file"
 done
 
-registered=""
-[ ! -f "$runner_dir/.runner" ] || registered=" (registered)"
+registered=" (registered)"
+[ -f "$runner_dir/.runner" ] || registered=" (NEW: registers another runner and asks for a token)"
 cat <<SUMMARY
 
   repository  $repo

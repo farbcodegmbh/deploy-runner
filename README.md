@@ -21,24 +21,35 @@ belong to each project.
 ## Setting up a server
 
 Download the script pinned to a commit, not a branch, so a later push cannot change what runs as root.
-Read it, then run it as root. Never pipe it into `sudo bash`: its prompts would read the script itself.
+Read it, then run it as root from the Forge site's directory. Never pipe it into `sudo bash`: its prompts
+would read the script itself.
 
 ```bash
-curl -fsSLo runner-setup.sh https://raw.githubusercontent.com/farbcodegmbh/deploy-runner/<commit>/setup.sh
+curl -fsSLo ~/runner-setup.sh https://raw.githubusercontent.com/farbcodegmbh/deploy-runner/<commit>/setup.sh
 ```
 
 ```bash
-sudo bash runner-setup.sh --repo OWNER/REPO --target NAME --workflow deploy.yml --branch develop --env APP=/path/to/.env --npmrc /path/to/.npmrc
+cd /home/forge/example.com && sudo bash ~/runner-setup.sh
 ```
+
+It reads the repository and branch from the site's checkout, suggests the target from the site's name
+and the workflow from the target, and asks for each app's build `.env`. Nothing changes before you
+confirm a summary. The answers are saved per target in `/etc/deploy-runner/NAME/setup.conf`, so a second
+run asks nothing, and every step checks what is already there. Every answer can be passed instead, which skips its question:
 
 | Option | Meaning |
 |--------|---------|
-| `--repo` | the GitHub repository the runner registers with |
-| `--target` | runner label, `/srv/builds/NAME` and `/etc/deploy-runner/NAME` |
-| `--workflow`, `--branch` | the only workflow file and branch the runner accepts, for `push` and `workflow_dispatch` |
+| `--repo OWNER/REPO` | the GitHub repository the runner registers with |
+| `--branch BRANCH` | the branch that deploys to this site |
+| `--target NAME` | runner label, `/srv/builds/NAME` and `/etc/deploy-runner/NAME` |
+| `--workflow FILE` | the deploy workflow in `.github/workflows`; with the branch, the only thing the runner accepts, for `push` and `workflow_dispatch` |
 | `--env APP=FILE` | an app's build-time `.env`, copied to `/etc/deploy-runner/NAME/APP/.env`; repeatable |
 | `--npmrc FILE` | copied next to every `--env`, for private packages |
 | `--runner-dir DIR` | where the runner lives, default `/home/builder/runners/NAME` |
+| `--yes` | skips the confirmation; required without a terminal |
+
+**Build env files become readable by the build user.** Give it only a frontend's build values, never the
+site's Laravel `.env` or anything else holding secrets.
 
 It asks for two secrets without echoing them:
 
@@ -49,8 +60,6 @@ It asks for two secrets without echoing them:
 ```bash
 gh api -X POST repos/OWNER/REPO/actions/runners/registration-token --jq .token
 ```
-
-The script is safe to re-run; every step checks what is already there.
 
 ## What the project provides
 

@@ -4,31 +4,34 @@
 # that builds a project's frontends beside the site and then starts the site's Forge deploy.
 # How it fits together and what stays manual: README.md of https://github.com/farbcodegmbh/deploy-runner
 #
-# Safe to re-run: every step checks what is already there. It asks for two secrets and neither reaches a
-# command line, the process list or the log: the runner registration token and the site's Forge deploy
-# hook URL.
+# Safe to re-run: every step checks what is already there, and the answers are saved per target, so a
+# second run asks nothing. It asks for two secrets and neither reaches a command line, the process list or
+# the log: the runner registration token and the site's Forge deploy hook URL.
 #
-# Run as root on the server:
-#   sudo bash setup.sh --repo OWNER/REPO --target NAME --workflow FILE --branch BRANCH \
-#       [--env APP=FILE]... [--npmrc FILE] [--runner-dir DIR]
-#
-#   --target      names the runner label, /srv/builds/NAME and /etc/deploy-runner/NAME
-#   --workflow    the deploy workflow's file name in .github/workflows; with --branch it is the only
-#                 thing the runner accepts
-#   --env         an app's build-time .env, copied to /etc/deploy-runner/NAME/APP/.env
-#   --npmrc       copied next to every --env
-#   --runner-dir  defaults to /home/builder/runners/NAME
+# Run as root from the Forge site's directory, where it reads repository and branch from the site's
+# checkout and asks for the rest:
+#   cd /home/forge/example.com && sudo bash /path/to/setup.sh
+# Every answer can also be passed, which skips its question:
+#   --repo OWNER/REPO   the repository the runner registers with
+#   --branch BRANCH     the branch that deploys to this site
+#   --target NAME       runner label, /srv/builds/NAME and /etc/deploy-runner/NAME
+#   --workflow FILE     the deploy workflow's file in .github/workflows; with the branch, the only thing
+#                       the runner accepts
+#   --env APP=FILE      an app's build-time .env, copied to /etc/deploy-runner/NAME/APP/.env; repeatable
+#   --npmrc FILE        copied next to every --env, for private packages
+#   --runner-dir DIR    defaults to /home/builder/runners/NAME
+#   --yes               skips the confirmation, required without a terminal
 
 set -euo pipefail
 
 user=builder
 etc=/etc/deploy-runner
 
-repo="" target="" workflow="" branch="" npmrc="" runner_dir=""
+repo="" target="" workflow="" branch="" npmrc="" runner_dir="" assume_yes=0
 envs=()
 
 usage() {
-    echo "usage: sudo bash $0 --repo OWNER/REPO --target NAME --workflow FILE --branch BRANCH [--env APP=FILE]... [--npmrc FILE] [--runner-dir DIR]" >&2
+    sed -n '/^# Run as root/,/^$/s/^# \{0,1\}//p' "$0" >&2
     exit 2
 }
 
@@ -41,7 +44,24 @@ step() {
     echo "== $*"
 }
 
+# ask VAR QUESTION [DEFAULT]: keeps a value that is already set, otherwise asks on the terminal
+ask() {
+    local var=$1 question=$2 default=${3:-} answer
+    [ -z "${!var}" ] || return 0
+    if [ ! -t 0 ]; then
+        [ -n "$default" ] || fail "no --$var given and no terminal to ask on"
+        printf -v "$var" '%s' "$default"
+        return 0
+    fi
+    read -r -e -p "$question${default:+ [$default]}: " answer
+    printf -v "$var" '%s' "${answer:-$default}"
+}
+
 while [ $# -gt 0 ]; do
+    case "$1" in
+        --yes)     assume_yes=1; shift; continue ;;
+        -h|--help) usage ;;
+    esac
     [ $# -ge 2 ] || usage
     case "$1" in
         --repo)       repo=$2 ;;
@@ -56,23 +76,124 @@ while [ $# -gt 0 ]; do
     shift 2
 done
 
-[ -n "$repo" ] && [ -n "$target" ] && [ -n "$workflow" ] && [ -n "$branch" ] || usage
-[[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "--repo expects OWNER/REPO"
-[[ "$target" =~ ^[a-z0-9-]+$ ]] || fail "--target takes lowercase letters, digits and dashes"
-[[ "$workflow" =~ ^[A-Za-z0-9_.-]+\.ya?ml$ ]] || fail "--workflow expects a file name such as deploy-testing.yml"
-[ -z "$npmrc" ] || [ -f "$npmrc" ] || fail "--npmrc $npmrc does not exist"
-for pair in "${envs[@]}"; do
-    [[ "${pair%%=*}" =~ ^[a-z0-9-]+$ ]] && [ -f "${pair#*=}" ] || fail "--env $pair: expected APP=existing file"
-done
-[ "$(id -u)" = 0 ] || fail "run as root: sudo bash $0 ..."
+[ "$(id -u)" = 0 ] || fail "run as root: sudo bash $0"
 for tool in curl tar python3 sha256sum systemctl; do
     command -v "$tool" >/dev/null || fail "missing on this server: $tool"
 done
 
+# a Forge site directory: its checkout names the repository and the branch
+site="" site_repo="" site_branch=""
+if [ -L current ] || [ -d releases ] || [ -d .git ]; then
+    site=$PWD
+    for git_dir in "$site/current/.git" "$site/.git"; do
+        [ -f "$git_dir/config" ] || continue
+        # -C / keeps git from looking at the surrounding checkout, which root does not own
+        if url=$(git -C / config -f "$git_dir/config" remote.origin.url); then
+            site_repo=$(sed -E 's#^(git@github\.com:|https://([^@/]+@)?github\.com/)##; s#\.git$##' <<< "$url")
+            [[ "$site_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || site_repo=""
+        fi
+        site_branch=$(sed -n 's#^ref: refs/heads/##p' "$git_dir/HEAD")
+        break
+    done
+fi
+
+targets=()
+for dir in "$etc"/*/; do
+    [ -d "$dir" ] && targets+=("$(basename "$dir")")
+done
+if [ ${#targets[@]} -gt 0 ]; then
+    echo "targets on this server: ${targets[*]}"
+fi
+target_default=""
+if [ ${#targets[@]} -eq 1 ]; then
+    target_default=${targets[0]}
+elif [ -n "$site" ]; then
+    target_default=$(basename "$site" | tr 'A-Z.' 'a-z-' | tr -cd 'a-z0-9-')
+fi
+ask target "Target name (runner label and folder name)" "$target_default"
+[[ "$target" =~ ^[a-z0-9-]+$ ]] || fail "the target takes lowercase letters, digits and dashes"
+
+# answers saved by an earlier run for this target
+saved_repo="" saved_branch="" saved_workflow="" saved_runner_dir=""
+if [ -f "$etc/$target/setup.conf" ]; then
+    while IFS='=' read -r key value; do
+        case "$key" in
+            repo)       saved_repo=$value ;;
+            branch)     saved_branch=$value ;;
+            workflow)   saved_workflow=$value ;;
+            runner_dir) saved_runner_dir=$value ;;
+        esac
+    done < "$etc/$target/setup.conf"
+fi
+
+ask repo "GitHub repository (OWNER/REPO)" "${saved_repo:-$site_repo}"
+[[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "the repository has to be OWNER/REPO"
+ask branch "Branch that deploys here" "${saved_branch:-${site_branch:-develop}}"
+[[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "not a branch name: $branch"
+ask workflow "Deploy workflow file in .github/workflows" "${saved_workflow:-deploy-$target.yml}"
+[[ "$workflow" =~ ^[A-Za-z0-9_.-]+\.ya?ml$ ]] || fail "the workflow is a file name such as deploy-testing.yml"
+runner_dir=${runner_dir:-${saved_runner_dir:-/home/$user/runners/$target}}
+
 builds=/srv/builds/$target
 env_dir=$etc/$target
-runner_dir=${runner_dir:-/home/$user/runners/$target}
 runner_name="$(hostname)-$target"
+
+if [ ${#envs[@]} -eq 0 ] && [ -t 0 ]; then
+    add_env=y apps=""
+    if [ -d "$env_dir" ]; then
+        apps=$(find "$env_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f ')
+    fi
+    if [ -n "$apps" ]; then
+        echo "build env already stored for: $apps"
+        read -r -p "Add or replace an app's build env? [y/N] " add_env
+    fi
+    if [[ "$add_env" =~ ^[yY] ]]; then
+        echo "Build env, one frontend app at a time. The build user can read these files, so never give it"
+        echo "the site's Laravel .env or anything else holding secrets."
+        if [ -n "$site" ]; then
+            echo "env files in this site: $(find "$site" "$site/shared" -maxdepth 1 -type f \( -name '.env*' -o -name '.npmrc' \) 2>/dev/null | tr '\n' ' ')"
+        fi
+        while read -r -e -p "App directory in the repository (empty when done): " app && [ -n "$app" ]; do
+            read -r -e -p "  build .env for $app: " file
+            envs+=("$app=$file")
+        done
+        if [ ${#envs[@]} -gt 0 ] && [ -z "$npmrc" ]; then
+            npmrc_default=""
+            for candidate in "$site/shared/.npmrc" "$site/.npmrc"; do
+                if [ -n "$site" ] && [ -f "$candidate" ]; then
+                    npmrc_default=$candidate
+                    break
+                fi
+            done
+            read -r -e -p ".npmrc for private packages, - for none${npmrc_default:+ [$npmrc_default]}: " npmrc
+            npmrc=${npmrc:-$npmrc_default}
+            [ "$npmrc" != "-" ] || npmrc=""
+        fi
+    fi
+fi
+[ -z "$npmrc" ] || [ -f "$npmrc" ] || fail "no such file: $npmrc"
+for pair in "${envs[@]}"; do
+    [[ "${pair%%=*}" =~ ^[a-z0-9-]+$ ]] && [ -f "${pair#*=}" ] || fail "build env $pair: expected APP=existing file"
+done
+
+registered=""
+[ ! -f "$runner_dir/.runner" ] || registered=" (registered)"
+cat <<SUMMARY
+
+  repository  $repo
+  branch      $branch
+  workflow    .github/workflows/$workflow
+  target      $target: label, $builds, $env_dir
+  runner      $runner_dir$registered
+  build env   ${envs[*]:-unchanged}
+  npmrc       ${npmrc:-none}
+
+SUMMARY
+if [ "$assume_yes" = 0 ]; then
+    [ -t 0 ] || fail "no terminal to confirm on; pass --yes"
+    read -r -p "Set this up? [Y/n] " answer
+    [[ "$answer" =~ ^([yY].*)?$ ]] || fail "stopped, nothing changed"
+fi
 
 step "build user"
 if id "$user" >/dev/null 2>&1; then
@@ -181,6 +302,10 @@ if ! grep -qxF -- "$hook_line" "$runner_dir/.env" 2>/dev/null; then
     chown "$user:$user" "$runner_dir/.env"
     hook_added=1
 fi
+
+printf 'repo=%s\nbranch=%s\nworkflow=%s\nrunner_dir=%s\n' "$repo" "$branch" "$workflow" "$runner_dir" > "$env_dir/setup.conf"
+chown root:"$user" "$env_dir/setup.conf"
+chmod 640 "$env_dir/setup.conf"
 
 step "service"
 cd "$runner_dir"

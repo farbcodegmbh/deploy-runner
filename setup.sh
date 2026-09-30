@@ -20,6 +20,7 @@
 #   --env APP=FILE      an app's build-time .env, copied to /etc/deploy-runner/NAME/APP/.env; repeatable
 #   --npmrc FILE        copied next to every --env, for private packages
 #   --runner-dir DIR    defaults to /home/builder/runners/NAME
+#   --manual-only       the runner refuses push runs and accepts only workflow_dispatch; kept on re-runs
 #   --yes               skips the confirmation, required without a terminal
 
 set -euo pipefail
@@ -27,7 +28,7 @@ set -euo pipefail
 user=builder
 etc=/etc/deploy-runner
 
-repo="" target="" workflow="" branch="" npmrc="" runner_dir="" assume_yes=0
+repo="" target="" workflow="" branch="" npmrc="" runner_dir="" assume_yes=0 manual_only=0
 envs=()
 
 usage() {
@@ -60,6 +61,7 @@ ask() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --yes)     assume_yes=1; shift; continue ;;
+        --manual-only) manual_only=1; shift; continue ;;
         -h|--help) usage ;;
     esac
     [ $# -ge 2 ] || usage
@@ -122,6 +124,7 @@ if [ -f "$etc/$target/setup.conf" ]; then
             branch)     saved_branch=$value ;;
             workflow)   saved_workflow=$value ;;
             runner_dir) saved_runner_dir=$value ;;
+            manual_only) if [ "$value" = 1 ]; then manual_only=1; fi ;;
         esac
     done < "$etc/$target/setup.conf"
 fi
@@ -209,6 +212,7 @@ cat <<SUMMARY
   runner      $runner_dir$registered
   build env   ${envs[*]:-unchanged}
   npmrc       ${npmrc:-none}
+  starts on   $([ "$manual_only" = 1 ] && echo "workflow_dispatch only" || echo "push and workflow_dispatch")
 
 SUMMARY
 if [ "$assume_yes" = 0 ]; then
@@ -251,8 +255,17 @@ chown root:root "$etc/pre-job.sh"
 chmod 755 "$etc/pre-job.sh"
 touch "$etc/allow"
 chmod 644 "$etc/allow"
-for event in push workflow_dispatch; do
-    line="$event $repo/.github/workflows/$workflow@refs/heads/$branch"
+workflow_ref="$repo/.github/workflows/$workflow@refs/heads/$branch"
+events="push workflow_dispatch"
+if [ "$manual_only" = 1 ]; then
+    events="workflow_dispatch"
+    # an earlier run may have allowed push for this workflow
+    grep -vxF -- "push $workflow_ref" "$etc/allow" > "$etc/allow.tmp" || true
+    cat "$etc/allow.tmp" > "$etc/allow"
+    rm "$etc/allow.tmp"
+fi
+for event in $events; do
+    line="$event $workflow_ref"
     if ! grep -qxF -- "$line" "$etc/allow"; then
         echo "$line" >> "$etc/allow"
     fi
@@ -325,7 +338,7 @@ if ! grep -qxF -- "$hook_line" "$runner_dir/.env" 2>/dev/null; then
     hook_added=1
 fi
 
-printf 'repo=%s\nbranch=%s\nworkflow=%s\nrunner_dir=%s\n' "$repo" "$branch" "$workflow" "$runner_dir" > "$env_dir/setup.conf"
+printf 'repo=%s\nbranch=%s\nworkflow=%s\nrunner_dir=%s\nmanual_only=%s\n' "$repo" "$branch" "$workflow" "$runner_dir" "$manual_only" > "$env_dir/setup.conf"
 chown root:"$user" "$env_dir/setup.conf"
 chmod 640 "$env_dir/setup.conf"
 

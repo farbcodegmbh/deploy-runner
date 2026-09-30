@@ -46,6 +46,7 @@ run only asks for confirmation, and every step checks what is already there. Eve
 | `--env APP=FILE` | an app's build-time `.env`, copied to `/etc/deploy-runner/NAME/APP/.env`; repeatable |
 | `--npmrc FILE` | copied next to every `--env`, for private packages |
 | `--runner-dir DIR` | where the runner lives, default `/home/builder/runners/NAME` |
+| `--manual-only` | accepts only manual runs (`workflow_dispatch`), for a site that must not deploy on push; kept on later runs |
 | `--yes` | skips the confirmation; required without a terminal |
 
 **Build env files become readable by the build user.** Give it only a frontend's build values, never the
@@ -63,7 +64,7 @@ gh api -X POST repos/OWNER/REPO/actions/runners/registration-token --jq .token
 
 ## What the project provides
 
-**A workflow** on the runner:
+**A workflow** on the runner. For a site set up with `--manual-only`, leave out the `push` trigger:
 
 ```yaml
 name: Deploy testing

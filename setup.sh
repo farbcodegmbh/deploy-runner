@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #
 # Sets up a deploy runner on a Forge server: a GitHub Actions runner under the unprivileged `builder` user
-# that builds a project's frontends beside the site and then starts the site's Forge deploy.
+# that builds a project's frontends beside the site and then starts the site's Forge deploy, or with
+# --no-hook only builds, for a site whose deploy a person starts in Forge.
 # How it fits together and what stays manual: README.md of https://github.com/farbcodegmbh/deploy-runner
 #
 # Safe to re-run: every step checks what is already there, and the answers are saved per target, so a
 # second run only asks for confirmation. It asks for two secrets and neither reaches a command line, the process list or
-# the log: the runner registration token and the site's Forge deploy hook URL.
+# the log: the runner registration token and the site's Forge deploy hook URL (not with --no-hook).
 #
 # Run as root from the Forge site's directory, where it reads repository and branch from the site's
 # checkout and asks for the rest:
@@ -21,6 +22,8 @@
 #   --npmrc FILE        copied next to every --env, for private packages
 #   --runner-dir DIR    defaults to /home/builder/runners/NAME
 #   --manual-only       the runner refuses push runs and accepts only workflow_dispatch; kept on re-runs
+#   --no-hook           stores no Forge deploy hook and removes one stored earlier, so no job can start a
+#                       deploy; the workflow only builds and the deploy is started in Forge; kept on re-runs
 #   --yes               skips the confirmation, required without a terminal
 
 set -euo pipefail
@@ -28,7 +31,7 @@ set -euo pipefail
 user=builder
 etc=/etc/deploy-runner
 
-repo="" target="" workflow="" branch="" npmrc="" runner_dir="" assume_yes=0 manual_only=0
+repo="" target="" workflow="" branch="" npmrc="" runner_dir="" assume_yes=0 manual_only=0 no_hook=0
 envs=()
 
 usage() {
@@ -62,6 +65,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --yes)     assume_yes=1; shift; continue ;;
         --manual-only) manual_only=1; shift; continue ;;
+        --no-hook) no_hook=1; shift; continue ;;
         -h|--help) usage ;;
     esac
     [ $# -ge 2 ] || usage
@@ -125,6 +129,7 @@ if [ -f "$etc/$target/setup.conf" ]; then
             workflow)   saved_workflow=$value ;;
             runner_dir) saved_runner_dir=$value ;;
             manual_only) if [ "$value" = 1 ]; then manual_only=1; fi ;;
+            no_hook)     if [ "$value" = 1 ]; then no_hook=1; fi ;;
         esac
     done < "$etc/$target/setup.conf"
 fi
@@ -213,6 +218,7 @@ cat <<SUMMARY
   build env   ${envs[*]:-unchanged}
   npmrc       ${npmrc:-none}
   starts on   $([ "$manual_only" = 1 ] && echo "workflow_dispatch only" || echo "push and workflow_dispatch")
+  deploys     $([ "$no_hook" = 1 ] && echo "never: builds only, the deploy is started in Forge" || echo "through the site's Forge deploy hook")
 
 SUMMARY
 if [ "$assume_yes" = 0 ]; then
@@ -285,7 +291,15 @@ done
 
 step "deploy hook"
 hook_file=$env_dir/forge-deploy-hook
-if [ -s "$hook_file" ]; then
+if [ "$no_hook" = 1 ]; then
+    # the build user can read this file, so with it every job could start the deploy
+    if [ -e "$hook_file" ]; then
+        rm -f "$hook_file"
+        echo "removed $hook_file; rotate the site's deploy hook token in Forge, the old one was readable here"
+    else
+        echo "none stored: the deploy is started in Forge"
+    fi
+elif [ -s "$hook_file" ]; then
     echo "already stored in $hook_file"
 else
     read -rs -p "Forge deploy hook URL of the site (Deployments > Deploy hook): " hook_url
@@ -338,7 +352,7 @@ if ! grep -qxF -- "$hook_line" "$runner_dir/.env" 2>/dev/null; then
     hook_added=1
 fi
 
-printf 'repo=%s\nbranch=%s\nworkflow=%s\nrunner_dir=%s\nmanual_only=%s\n' "$repo" "$branch" "$workflow" "$runner_dir" "$manual_only" > "$env_dir/setup.conf"
+printf 'repo=%s\nbranch=%s\nworkflow=%s\nrunner_dir=%s\nmanual_only=%s\nno_hook=%s\n' "$repo" "$branch" "$workflow" "$runner_dir" "$manual_only" "$no_hook" > "$env_dir/setup.conf"
 chown root:"$user" "$env_dir/setup.conf"
 chmod 640 "$env_dir/setup.conf"
 

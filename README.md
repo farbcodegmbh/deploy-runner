@@ -15,7 +15,8 @@ belong to each project.
    the first step runs.
 3. The project's build script writes `/srv/builds/<target>/<commit>/` and a `.complete` marker in it,
    running as `builder`, which can read neither the site's `.env` nor its releases.
-4. The workflow calls the site's Forge deploy hook with `&sha=<commit>`.
+4. The workflow calls the site's Forge deploy hook with `&sha=<commit>`. With `--no-hook` it stops after the
+   build, and a person starts the deploy in Forge, which then finds the build of the commit it deploys.
 5. Forge's deploy script checks out that commit, copies that commit's build into the release and deploys.
 
 ## Setting up a server
@@ -47,6 +48,7 @@ run only asks for confirmation, and every step checks what is already there. Eve
 | `--npmrc FILE` | copied next to every `--env`, for private packages |
 | `--runner-dir DIR` | where the runner lives, default `/home/builder/runners/NAME` |
 | `--manual-only` | accepts only manual runs (`workflow_dispatch`), for a site that must not deploy on push; kept on later runs |
+| `--no-hook` | stores no deploy hook and removes one stored earlier, for a site whose deploy only a person starts (production); kept on later runs |
 | `--yes` | skips the confirmation; required without a terminal |
 
 **Build env files become readable by the build user.** Give it only a frontend's build values, never the
@@ -54,7 +56,8 @@ site's Laravel `.env` or anything else holding secrets.
 
 It asks for two secrets without echoing them:
 
-- **The site's deploy hook URL:** Forge → the site → Deployments → Deploy hook.
+- **The site's deploy hook URL:** Forge → the site → Deployments → Deploy hook. Not with `--no-hook`: the build user
+  can read the stored URL, so every job could start the deploy. Rotate the token after removing a stored one.
 - **A runner registration token,** valid for an hour: repository Settings → Actions → Runners → New
   self-hosted runner, or
 
